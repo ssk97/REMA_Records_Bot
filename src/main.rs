@@ -392,12 +392,13 @@ impl EventHandler for Handler {
 
     async fn ready(&self, ctx: Context, ready: Ready) {
         //Only need to do this once (or if I change the commands)
-
         /*let result = Command::set_global_commands(&ctx.http, vec![
             CreateCommand::new("begin").description("Begin setting up a new match matrix")
+                .default_member_permissions(Permissions::MODERATE_MEMBERS)
                 .add_option(CreateCommandOption::new(CommandOptionType::String, "title", "The name of the thread to make").required(true))
                 .add_option(CreateCommandOption::new(CommandOptionType::String, "cmd", "The new command-name for results (lower case, no spaces)").required(true)),
             CreateCommand::new("add").description("Add user(s) for setup")
+                .default_member_permissions(Permissions::MODERATE_MEMBERS)
                 .add_option(CreateCommandOption::new(CommandOptionType::User, "player", "First user to add").required(true))
                 .add_option(CreateCommandOption::new(CommandOptionType::User, "player2", "Second user"))
                 .add_option(CreateCommandOption::new(CommandOptionType::User, "player3", "Third user"))
@@ -408,10 +409,15 @@ impl EventHandler for Handler {
                 .add_option(CreateCommandOption::new(CommandOptionType::User, "player8", "Eighth user"))
                 .add_option(CreateCommandOption::new(CommandOptionType::User, "player9", "Ninth user"))
                 .add_option(CreateCommandOption::new(CommandOptionType::User, "player10", "Tenth user (if you need more, call the command again)")),
-            CreateCommand::new("create").description("Create the match results matrix thread in this channel"),
-            CreateCommand::new("cancel").description("Cancel the current match matrix setup"),
+            CreateCommand::new("create").description("Create the match results matrix thread in this channel")
+                .default_member_permissions(Permissions::MODERATE_MEMBERS),
+            CreateCommand::new("cancel").description("Cancel the current match matrix setup")
+                .default_member_permissions(Permissions::MODERATE_MEMBERS),
             CreateCommand::new("end").description("End a match matrix, posting final results in this channel")
+                .default_member_permissions(Permissions::MODERATE_MEMBERS)
                 .add_option(CreateCommandOption::new(CommandOptionType::String, "cmd", "The command-name of the tournament to end").required(true)),
+            CreateCommand::new("reprocess").description("Read this channel's matrix info into storage. Also resets unavailable report commands")
+                .default_member_permissions(Permissions::MODERATE_MEMBERS),
             CreateCommand::new("result").description("Report a match result with arbitrary users for the current results thread")
                 .add_option(CreateCommandOption::new(CommandOptionType::String, "score", "What was the match score")
                     .add_string_choice("2-0 (Win)", "2-0").add_string_choice("2-1 (Win)", "2-1")
@@ -419,7 +425,6 @@ impl EventHandler for Handler {
                     .add_string_choice("0-0 (No result)", "0-0").required(true))
                 .add_option(CreateCommandOption::new(CommandOptionType::User, "opponent", "The second player in the match").required(true))
                 .add_option(CreateCommandOption::new(CommandOptionType::User, "player", "Use an alternative first player in the match (otherwise assumed to be you)")),
-            CreateCommand::new("reprocess").description("Read this channel's matrix info into storage. Also resets unavailable report commands"),
             ]).await;
         if let Err(why) = result {
             println!("Error setting up global commands: {why:?}");
