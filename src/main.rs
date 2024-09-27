@@ -111,7 +111,6 @@ fn lookup_username<'a>(username: &str, users: &'a [LocalUser]) -> Option<LocalUs
             return Some(user.clone())
         }
     }
-    println!("{} not found in {:?}", username, users);
     None
 }
 
@@ -121,7 +120,6 @@ fn lookup_userid<'a>(id: UserId, users: &'a [LocalUser]) -> Option<LocalUser>{
             return Some(user.clone())
         }
     }
-    println!("{} not found in {:?}", id, users);
     None
 }
 
@@ -216,7 +214,6 @@ impl Handler{
     }
 
     async fn create(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
-        println!("finalizing");
         let guild = command.guild_id.context("guild not found in create")?;
         if !self.setup_data.contains_key(&guild){
             return Err(anyhow!("Create when not doing setup"));
@@ -253,7 +250,6 @@ impl Handler{
         let mut match_vec = self.match_data.entry(guild).or_insert(HashMap::new());
         let matrix = MatchMatrix{thread: thread.id, mainpost, users: setup.users, results};
         match_vec.insert(setup.shortname, matrix);
-        println!("Completed creation");
 
         Ok("Success!".to_string())
     }
@@ -402,7 +398,7 @@ impl EventHandler for Handler {
     }*/
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         if let Interaction::Command(command) = interaction {
-            println!("Received command interaction: {command:#?}");
+            //println!("Received command interaction: {command:#?}");
             let result = match command.data.name.as_str() {
                 "begin" => self.begin(&command),
                 "add" => self.add_users(&ctx, &command).await,
