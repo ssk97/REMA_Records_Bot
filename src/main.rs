@@ -113,7 +113,6 @@ fn lookup_username<'a>(username: &str, users: &'a [LocalUser]) -> Option<LocalUs
     }
     None
 }
-
 fn lookup_userid<'a>(id: UserId, users: &'a [LocalUser]) -> Option<LocalUser>{
     for user in users{
         if user.id == id{
@@ -215,10 +214,7 @@ impl Handler{
 
     async fn create(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
         let guild = command.guild_id.context("guild not found in create")?;
-        if !self.setup_data.contains_key(&guild){
-            return Err(anyhow!("Create when not doing setup"));
-        }
-        let setup = self.setup_data.get(&guild).context("setup data not found to create!")?;
+        let setup = self.setup_data.get(&guild).context("Create called when not doing setup!")?;
         let thread_builder = CreateThread::new(&setup.threadname)
             .kind(ChannelType::PublicThread);
         let thread = command.channel_id.create_thread(&ctx.http, thread_builder).await?;
@@ -228,9 +224,9 @@ impl Handler{
             initial_message_str = initial_message_str+"<@"+&user.id.to_string()+"> ";
         }
         thread.send_message(&ctx.http, CreateMessage::new()
-        .allowed_mentions(CreateAllowedMentions::new().users(setup.users.iter().map(|x| &x.user).into_iter()))
-        .content(initial_message_str+" Report your results here using the command /"+&setup.shortname+" or /result"))
-        .await?;
+            .allowed_mentions(CreateAllowedMentions::new().users(setup.users.iter().map(|x| &x.user).into_iter()))
+            .content(initial_message_str+" Report your results here using the command /"+&setup.shortname+" or /result"))
+            .await?;
 
         let mut results = HashMap::new();
         for y in &setup.users{
