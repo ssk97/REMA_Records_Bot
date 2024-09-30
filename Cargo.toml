@@ -6,7 +6,9 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-serenity = "0.12"
+#serenity = "0.12"
+#Need one with the fix for https://github.com/serenity-rs/serenity/issues/2892
+serenity = {git = "https://github.com/serenity-rs/serenity", rev = "853f17799c68e073965cc568308333f436fadc44"}
 tokio = { version = "1.21.2", features = ["macros", "rt-multi-thread"] }
 dashmap = "6.1.0"
 regex = "1.10.6"
