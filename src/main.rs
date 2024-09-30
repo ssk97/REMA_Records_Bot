@@ -72,6 +72,7 @@ struct LocalUser{
 
 fn render_grid(users: &[LocalUser], results: &Matches, header: &str) -> Result<String> {
     let mut message_str = header.to_string();
+    message_str+="\n";
     for y in users{
         let mut wins = 0;
         let mut matches = 0;
