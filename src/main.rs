@@ -53,6 +53,7 @@ struct MatchMatrixSetup{
 }
 struct MatchMatrix{
     thread: ChannelId,
+    threadname: String,
     mainpost: MessageId,
     users: Vec<LocalUser>,
     results: Matches
@@ -69,8 +70,8 @@ struct LocalUser{
     user: User,
 }
 
-fn render_grid(users: &[LocalUser], results: &Matches) -> Result<String> {
-    let mut message_str = String::new();
+fn render_grid(users: &[LocalUser], results: &Matches, header: &str) -> Result<String> {
+    let mut message_str = header.to_string();
     for y in users{
         let mut wins = 0;
         let mut matches = 0;
@@ -235,7 +236,7 @@ impl Handler{
                 results.insert((x.id, y.id), result);
             }
         }
-        let mainpost = thread.say(&ctx.http, render_grid(&setup.users, &results)?).await?.id;
+        let mainpost = thread.say(&ctx.http, render_grid(&setup.users, &results, &setup.threadname)?).await?.id;
         Self::register_match_command(ctx, &guild, &setup.users, &setup.threadname, &setup.shortname).await?;
 
         thread.say(&ctx.http, ":cloud: match available\n:full_moon: match won 2-0\n:waning_gibbous_moon: match won 2-1\n\
@@ -244,7 +245,7 @@ impl Handler{
         drop(setup); //Prevent deadlock
         let (_, setup) = self.setup_data.remove(&guild).context("setup data not found to remove!")?;
         let mut match_vec = self.match_data.entry(guild).or_insert(HashMap::new());
-        let matrix = MatchMatrix{thread: thread.id, mainpost, users: setup.users, results};
+        let matrix = MatchMatrix{thread: thread.id, threadname:setup.threadname, mainpost, users: setup.users, results};
         match_vec.insert(setup.shortname, matrix);
 
         Ok("Success!".to_string())
@@ -306,7 +307,7 @@ impl Handler{
         **x = result;
         matrix.thread.say(&ctx.http, format!("{} reports {} {} {}", reporter_user, player.name, result_str, opponent.name)).await?;
         matrix.thread.message(&ctx.http, matrix.mainpost).await?.edit(&ctx.http, 
-            EditMessage::new().content(render_grid(&matrix.users, &matrix.results)?)).await?;
+            EditMessage::new().content(render_grid(&matrix.users, &matrix.results, &matrix.threadname)?)).await?;
         return Ok("Success".to_string());
     }
 
@@ -324,7 +325,7 @@ impl Handler{
         for slashcommand in &commands_list {
             if &slashcommand.name == commandshortname{
                 guild.delete_command(&ctx.http, slashcommand.id).await?;
-                command.channel_id.say(&ctx.http, render_grid(&matchup.users, &matchup.results)?).await?;
+                command.channel_id.say(&ctx.http, render_grid(&matchup.users, &matchup.results, &matchup.threadname)?).await?;
                 match_data_list.remove(*commandshortname);
                 return Ok("Success".to_string());
             }
@@ -374,7 +375,7 @@ impl Handler{
         let fullname = &tmp.as_ref().context("getting channel/thread")?.name.as_ref().context("getting channel/thread name")?;
         Self::register_match_command(ctx, &guild, &user_list, fullname, shortname).await?;
 
-        let matrix = MatchMatrix{thread: command.channel_id, mainpost, users: user_list, results};
+        let matrix = MatchMatrix{thread: command.channel_id, threadname:fullname.to_string(), mainpost, users: user_list, results};
         match_vec.insert(shortname.to_string(), matrix);
         
         Ok(format!("Processed {} ({}) with {} users", fullname, shortname, user_count))
