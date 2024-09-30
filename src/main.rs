@@ -76,7 +76,7 @@ fn render_grid(users: &[LocalUser], results: &Matches, header: &str) -> Result<S
         let mut wins = 0;
         let mut matches = 0;
         for x in users{
-            let result = results.get(&(x.id, y.id)).context("Grid render failed: user name changed?")?;
+            let result = results.get(&(x.id, y.id)).context("Grid render failed: users not found in matrix")?;
             message_str.push_str(result.render());
             if [MatchResult::TwoZero, MatchResult::TwoOne].contains(result){
                 wins += 1;
@@ -368,6 +368,10 @@ impl Handler{
         Self::register_match_command(ctx, &guild, &user_list, fullname, shortname).await?;
 
         let matrix = MatchMatrix{thread: command.channel_id, threadname:fullname.to_string(), mainpost, users: user_list, results};
+        if matrix_post.content != render_grid(&matrix.users, &matrix.results, &matrix.threadname)?{
+            matrix.thread.message(&ctx.http, matrix.mainpost).await?.edit(&ctx.http,
+                EditMessage::new().content(render_grid(&matrix.users, &matrix.results, &matrix.threadname)?)).await?;
+        }
         match_vec.insert(shortname.to_string(), matrix);
         
         Ok(format!("Processed {} ({}) with {} users", fullname, shortname, user_count))
