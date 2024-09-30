@@ -72,7 +72,7 @@ struct LocalUser{
 
 fn render_grid(users: &[LocalUser], results: &Matches, header: &str) -> Result<String> {
     let mut message_str = header.to_string();
-    message_str+="\n";
+    message_str += "\n";
     for y in users{
         let mut wins = 0;
         let mut matches = 0;
@@ -332,7 +332,7 @@ impl Handler{
         if match_vec.len() == 0{
             guild.set_commands(&ctx.http, vec![]).await?;
         }
-        let messages = command.channel_id.messages(&ctx.http, GetMessages::new().limit(100)).await?;
+        let messages = ctx.http.get_messages(command.channel_id, None, Some(100)).await?;
         let intro = &messages.get(messages.len()-1).context("intro message not found")?.content;
         let matrix_post = &messages.get(messages.len()-2).context("matrix message not found")?;
 
@@ -364,8 +364,7 @@ impl Handler{
         //final setup
         let user_count = user_list.len();
         let mainpost = matrix_post.id;
-        let tmp = &command.channel;
-        let fullname = &tmp.as_ref().context("getting channel/thread")?.name.as_ref().context("getting channel/thread name")?;
+        let fullname = &(&command.channel).as_ref().context("getting channel/thread")?.name.as_ref().context("getting channel/thread name")?;
         Self::register_match_command(ctx, &guild, &user_list, fullname, shortname).await?;
 
         let matrix = MatchMatrix{thread: command.channel_id, threadname:fullname.to_string(), mainpost, users: user_list, results};
@@ -392,6 +391,12 @@ impl EventHandler for Handler {
     }*/
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         if let Interaction::Command(command) = interaction {
+            let response1 = command.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().ephemeral(true)
+                .content("Processing"))).await;
+            if let Err(why) = response1{
+                println!("Cannot respond to slash command: {why}");
+                return;
+            }
             //println!("Received command interaction: {command:#?}");
             let result = match command.data.name.as_str() {
                 "begin" => self.begin(&command),
@@ -403,14 +408,13 @@ impl EventHandler for Handler {
                 "reprocess" => self.reprocess(&ctx, &command).await,
                 _ => self.report_result_command(&ctx, &command).await,
             };
-            let response = command.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().ephemeral(true)
-            .content(
+            let response2 = command.edit_response(&ctx.http, EditInteractionResponse::new().content(
                 match result{
-                    Err(why) => why.to_string(),
+                    Err(why) => why.to_string(), //{println!("{}", why.backtrace()); why.to_string()},
                     Ok(success_result) => success_result,
-                }))).await;
-            if let Err(why2) = response{
-                println!("Cannot respond to slash command: {why2}");
+                })).await;
+            if let Err(why) = response2{
+                println!("Cannot edit slash command response: {why}");
             }
         }
     }
