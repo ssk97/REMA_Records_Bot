@@ -106,14 +106,6 @@ fn render_grid(users: &[LocalUser], results: &Matches, header: &str) -> Result<S
     return Ok(message_str);
 }
 
-fn lookup_username<'a>(username: &str, users: &'a [LocalUser]) -> Option<LocalUser>{
-    for user in users{
-        if user.name == username{
-            return Some(user.clone())
-        }
-    }
-    None
-}
 fn lookup_userid<'a>(id: UserId, users: &'a [LocalUser]) -> Option<LocalUser>{
     for user in users{
         if user.id == id{
@@ -176,7 +168,7 @@ impl Handler{
                 value: ResolvedValue::User(user, _), ..
             }) = options.get(current_user) else {continue;};
             let localized = localize_user(user, ctx, guild).await?;
-            if lookup_username(&localized.name, &setup.value().users).is_some(){
+            if lookup_userid(user.id, &setup.value().users).is_some(){
                 extra_info += &localized.name;
                 extra_info += " already included.\n";
                 continue;
@@ -200,7 +192,7 @@ impl Handler{
     async fn register_match_command(ctx: &Context, guild: &GuildId, users: &[LocalUser], fullname: &str, shortname: &str) -> Result<()>{
         let mut player_options = CreateCommandOption::new(CommandOptionType::String, "opponent", "Who was your opponent").required(true);
         for user in users{
-            player_options = player_options.add_string_choice(&user.name, &user.name);
+            player_options = player_options.add_string_choice(&user.name, user.id.to_string());
         }
         guild.create_command(&ctx.http, CreateCommand::new(shortname)
         .description(format!("Submit result for {}", &fullname))
@@ -265,7 +257,7 @@ impl Handler{
         let commandshortname = &command.data.name;
         for (shortname, matrix) in match_data_list.iter_mut(){
             if commandshortname == shortname{
-                let opponent = lookup_username(opponent, &matrix.users).context("User not found")?;
+                let opponent = lookup_userid(opponent.parse()?, &matrix.users).context("User not found")?;
                 let player = lookup_userid(command.user.id, &matrix.users).context("User not found")?;
                 return self.report_result_generic(ctx, matrix, &player, result_str, &opponent, &command.user).await;
             }
