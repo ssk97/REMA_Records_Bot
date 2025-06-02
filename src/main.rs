@@ -448,8 +448,8 @@ impl Handler{
                 EditMessage::new().content(render_grid(&matrix.users, &matrix.results, &matrix.threadname)?)).await?;
         }
         let mut match_vec = self.match_data.entry(guild).or_insert(HashMap::new());
-        self.reset_tournament_commands(ctx, &guild, &match_vec).await?;
         match_vec.insert(shortname.to_string(), matrix);
+        self.reset_tournament_commands(ctx, &guild, &match_vec).await?;
         
         Ok(format!("Processed {} ({}) with {} users - currently running {} tournaments", fullname, shortname, user_count, match_vec.len()))
     }
