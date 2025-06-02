@@ -201,7 +201,7 @@ impl Handler{
 
         let mut initial_message_str = String::new();
         for user in &setup.users{
-            initial_message_str = initial_message_str+"<@"+&user.id.to_string()+"> ";
+            initial_message_str += &format!("<@{}> ", user.id);
         }
         thread.send_message(&ctx.http, CreateMessage::new()
             .allowed_mentions(CreateAllowedMentions::new().users(setup.users.iter().map(|x| &x.user)))
@@ -298,7 +298,7 @@ impl Handler{
             value: ResolvedValue::String(commandshortname), ..
         }) = options.get(0) else {return Err(anyhow!("name not found in end setup"));};
 
-        let matchup = match_data_list.get(*commandshortname).context("unable to find given name in match list")?;
+        let matchup = match_data_list.get(*commandshortname).context(format!("unable to find given name {} in match list", commandshortname))?;
         command.channel_id.say(&ctx.http, render_grid(&matchup.users, &matchup.results, &matchup.threadname)?).await?;
         match_data_list.remove(*commandshortname);
         self.reset_tournament_commands(ctx, &guild, &match_data_list).await?;
@@ -311,9 +311,9 @@ impl Handler{
         let mut ping_options = CreateCommandOption::new(CommandOptionType::String, "tournament", "Ping a tournament").required(true);
         let mut end_options = CreateCommandOption::new(CommandOptionType::String, "tournament", "The tournament to end").required(true);
         for (shortname, longname) in tournaments.iter().map(|(key, val)| (key, &val.threadname)){
-            fam_options = fam_options.add_string_choice(shortname, longname);
-            ping_options = ping_options.add_string_choice(shortname, longname);
-            end_options = end_options.add_string_choice(shortname, longname);
+            fam_options = fam_options.add_string_choice(longname, shortname);
+            ping_options = ping_options.add_string_choice(longname, shortname);
+            end_options = end_options.add_string_choice(longname, shortname);
         }
         let mut commands = vec![
             CreateCommand::new("fam").description("Ping other players that you haven't played yet").add_option(fam_options),
@@ -375,7 +375,7 @@ impl Handler{
             for opponent in &matrix.users{
                 //Self is MatchResult::Unplayable so no need to special case it
                 if matrix.results.get(&(playerid, opponent.id)) == Some(&MatchResult::NotPlayed) {
-                    message_str = message_str+"<@"+&opponent.id.to_string()+"> ";
+                    message_str += &format!("<@{}> ", opponent.id);
                     mentions.insert(opponent.id);
                     found_any = true;
                 }
@@ -384,7 +384,7 @@ impl Handler{
             Some(message_str)
         }
 
-        let mut output = format!("{} is trying to find a match to play, is anyone available?", playerid);
+        let mut output = format!("<@{}> is trying to find a match to play, is anyone available?", playerid);
         let commandshortname = match options.get(0){
             Some(ResolvedOption {
                 value: ResolvedValue::String(commandshortname), ..
@@ -500,7 +500,7 @@ impl EventHandler for Handler {
 
     async fn ready(&self, ctx: Context, _ready: Ready) {
         //Only need to do this once (or if I change the commands)
-        let result = Command::set_global_commands(&ctx.http, vec![
+        /*let result = Command::set_global_commands(&ctx.http, vec![
             CreateCommand::new("begin").description("Begin setting up a new match matrix")
                 .default_member_permissions(Permissions::MODERATE_MEMBERS)
                 .add_option(CreateCommandOption::new(CommandOptionType::String, "title", "The name of the thread to make").required(true))
@@ -533,7 +533,7 @@ impl EventHandler for Handler {
             ]).await;
         if let Err(why) = result {
             println!("Error setting up global commands: {why:?}");
-        }
+        }*/
     }
 }
 
