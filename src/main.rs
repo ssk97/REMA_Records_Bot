@@ -1,3 +1,4 @@
+#![allow(clippy::get_first, clippy::get_last_with_len)] //Clearer when also getting the 2nd or 2nd to last
 use std::env;
 
 use serenity::all::*;
@@ -16,32 +17,32 @@ enum MatchResult{
 impl MatchResult{
     fn get(result: &str) -> Self{
         match result{
-            "2-0"|":full_moon:" => return Self::TwoZero,
-            "2-1"|":waning_gibbous_moon:" => return Self::TwoOne,
-            "1-2"|":waxing_crescent_moon:" => return Self::OneTwo,
-            "0-2"|":new_moon:" => return Self::ZeroTwo,
-            "0-0"|":cloud:" => return Self::NotPlayed,
-            ":black_small_square:" | _ => return Self::Unplayable,
+            "2-0"|":full_moon:" => Self::TwoZero,
+            "2-1"|":waning_gibbous_moon:" => Self::TwoOne,
+            "1-2"|":waxing_crescent_moon:" => Self::OneTwo,
+            "0-2"|":new_moon:" => Self::ZeroTwo,
+            "0-0"|":cloud:" => Self::NotPlayed,
+            _ => Self::Unplayable,
         }
     }
     fn render(&self) -> &str{
         match self{
-            Self::NotPlayed => return &":cloud:",
-            Self::TwoZero => return &":full_moon:",
-            Self::TwoOne => return &":waning_gibbous_moon:",
-            Self::OneTwo => return &":waxing_crescent_moon:",
-            Self::ZeroTwo => return &":new_moon:",
-            Self::Unplayable => return &":black_small_square:"
+            Self::NotPlayed => ":cloud:",
+            Self::TwoZero => ":full_moon:",
+            Self::TwoOne => ":waning_gibbous_moon:",
+            Self::OneTwo => ":waxing_crescent_moon:",
+            Self::ZeroTwo => ":new_moon:",
+            Self::Unplayable => ":black_small_square:"
         }
     }
     fn invert(&self) -> Self{
         match self{
-            Self::NotPlayed => return Self::NotPlayed,
-            Self::TwoZero => return Self::ZeroTwo,
-            Self::TwoOne => return Self::OneTwo,
-            Self::OneTwo => return Self::TwoOne,
-            Self::ZeroTwo => return Self::TwoZero,
-            Self::Unplayable => return Self::Unplayable
+            Self::NotPlayed => Self::NotPlayed,
+            Self::TwoZero => Self::ZeroTwo,
+            Self::TwoOne => Self::OneTwo,
+            Self::OneTwo => Self::TwoOne,
+            Self::ZeroTwo => Self::TwoZero,
+            Self::Unplayable => Self::Unplayable
         }
     }
 }
@@ -92,7 +93,7 @@ fn render_grid(users: &[LocalUser], results: &Matches, header: &str) -> Result<S
         message_str.push_str(&format!("{}/{} {}\n", wins, matches, &y.name));
     }
     for user in users{
-        let c = user.name.to_ascii_lowercase().chars().filter(|x| x.is_ascii_alphanumeric()).next();
+        let c = user.name.to_ascii_lowercase().chars().find(|x| x.is_ascii_alphanumeric());
         let id_square = if let Some(c) = c{
             if c.is_ascii_alphabetic(){
                 format!(":regional_indicator_{c}:")
@@ -105,10 +106,10 @@ fn render_grid(users: &[LocalUser], results: &Matches, header: &str) -> Result<S
         message_str.push_str(&id_square);
         message_str.push(' ');
     }
-    return Ok(message_str);
+    Ok(message_str)
 }
 
-fn lookup_userid<'a>(id: UserId, users: &'a [LocalUser]) -> Option<LocalUser>{
+fn lookup_userid(id: UserId, users: &[LocalUser]) -> Option<LocalUser>{
     for user in users{
         if user.id == id{
             return Some(user.clone())
@@ -117,17 +118,17 @@ fn lookup_userid<'a>(id: UserId, users: &'a [LocalUser]) -> Option<LocalUser>{
     None
 }
 
-async fn localize_user<'a>(user: &User, ctx: &Context, guild: GuildId) -> Result<LocalUser>{
+async fn localize_user(user: &User, ctx: &Context, guild: GuildId) -> Result<LocalUser>{
     let member = guild.member(ctx, user.id).await?;
     Ok(LocalUser{name: member.display_name().to_string(), id:user.id, user: user.clone()})
 }
-fn member_to_user<'a>(member: &Member) -> LocalUser{
-    return LocalUser{name: member.display_name().to_string(), id:member.user.id, user: member.user.clone()}
+fn member_to_user(member: &Member) -> LocalUser{
+    LocalUser{name: member.display_name().to_string(), id:member.user.id, user: member.user.clone()}
 }
 
 impl Handler{
     fn new() -> Self{
-        return Handler {setup_data: DashMap::new(), match_data: DashMap::new()};
+        Handler {setup_data: DashMap::new(), match_data: DashMap::new()}
     }
 
     fn begin(&self, command: &CommandInteraction) -> Result<String>{
@@ -203,7 +204,7 @@ impl Handler{
             initial_message_str = initial_message_str+"<@"+&user.id.to_string()+"> ";
         }
         thread.send_message(&ctx.http, CreateMessage::new()
-            .allowed_mentions(CreateAllowedMentions::new().users(setup.users.iter().map(|x| &x.user).into_iter()))
+            .allowed_mentions(CreateAllowedMentions::new().users(setup.users.iter().map(|x| &x.user)))
             .flags(MessageFlags::SUPPRESS_NOTIFICATIONS)
             .content(initial_message_str+" Report your results here using the command /"+&setup.shortname+" or /result"))
             .await?;
@@ -247,7 +248,7 @@ impl Handler{
                 return self.report_result_generic(ctx, matrix, &player, result_str, &opponent, &command.user).await;
             }
         }
-        return Err(anyhow!("Illegal command/name not found to report to"));
+        Err(anyhow!("Illegal command/name not found to report to"))
     }
     async fn report_result_any(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
         let options = &command.data.options();
@@ -271,21 +272,21 @@ impl Handler{
                 return self.report_result_generic(ctx, matrix, &player, result_str, &opponent, &command.user).await;
             }
         }
-        return Err(anyhow!("Attempted to report but results thread not found"));
+        Err(anyhow!("Attempted to report but results thread not found"))
     }
     async fn report_result_generic(&self, ctx: &Context, matrix: &mut MatchMatrix, player: &LocalUser, result_str: &str, opponent: &LocalUser, reporter_user: &User) -> Result<String>{
         if player.id == opponent.id {
             return Err(anyhow!("trying to report a match played against the same player"));
         }
         let result = MatchResult::get(result_str);
-        let ref mut x = matrix.results.get_mut(&(player.id, opponent.id)).context("match not found - bad user id?")?;
+        let x = &mut matrix.results.get_mut(&(player.id, opponent.id)).context("match not found - bad user id?")?;
         **x = result.invert();
-        let ref mut x = matrix.results.get_mut(&(opponent.id, player.id)).context("reverse match not found - wtf?")?;
-        **x = result;
+        let x2 = &mut matrix.results.get_mut(&(opponent.id, player.id)).context("reverse match not found - wtf?")?;
+        **x2 = result;
         matrix.thread.say(&ctx.http, format!("{} reports {} {} {}", reporter_user, player.name, result_str, opponent.name)).await?;
         matrix.thread.message(&ctx.http, matrix.mainpost).await?.edit(&ctx.http, 
             EditMessage::new().content(render_grid(&matrix.users, &matrix.results, &matrix.threadname)?)).await?;
-        return Ok("Success".to_string());
+        Ok("Success".to_string())
     }
 
     async fn end(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
@@ -301,7 +302,7 @@ impl Handler{
         command.channel_id.say(&ctx.http, render_grid(&matchup.users, &matchup.results, &matchup.threadname)?).await?;
         match_data_list.remove(*commandshortname);
         self.reset_tournament_commands(ctx, &guild, &match_data_list).await?;
-        return Ok("Success".to_string());
+        Ok("Success".to_string())
     }
 
     async fn reset_tournament_commands(&self, ctx: &Context, guild: &GuildId, tournaments: &HashMap<String, MatchMatrix>) -> Result<()>{
@@ -335,7 +336,7 @@ impl Handler{
             ).add_option(player_options));
         }
         guild.set_commands(&ctx.http, commands).await?;
-        return Ok(());
+        Ok(())
     }
 
     async fn ping(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
@@ -353,11 +354,11 @@ impl Handler{
             message_str = message_str+"<@"+&user.id.to_string()+"> ";
         }
         command.channel_id.send_message(&ctx.http, CreateMessage::new()
-                .allowed_mentions(CreateAllowedMentions::new().users(matchup.users.iter().map(|x| &x.user).into_iter()))
+                .allowed_mentions(CreateAllowedMentions::new().users(matchup.users.iter().map(|x| &x.user)))
                 .flags(MessageFlags::SUPPRESS_NOTIFICATIONS)
                 .content(message_str))
                 .await?;
-        return Ok("Success".to_string());
+        Ok("Success".to_string())
     }
 
     async fn fam_pings(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
@@ -380,7 +381,7 @@ impl Handler{
                 }
             }
             if !found_any {return Some(String::from("All matches complete!"));}
-            return Some(message_str);
+            Some(message_str)
         }
 
         let mut output = format!("{} is trying to find a match to play, is anyone available?", playerid);
@@ -392,7 +393,7 @@ impl Handler{
             _ => return Err(anyhow!("Bad command arguments"))
         };
         for (shortname, matrix) in match_data_list.iter(){
-            if commandshortname == "" || commandshortname == shortname{
+            if commandshortname.is_empty() || commandshortname == shortname{
                 if let Some(opponents_string) = get_opponents(playerid, matrix, &mut mentions){
                     output += &format!("\n{}: {}", shortname, &opponents_string);
                 }
@@ -403,7 +404,7 @@ impl Handler{
                 .content(output))
                 .await?;
 
-        return Ok("Success".to_string());
+        Ok("Success".to_string())
     }
 
     async fn reprocess(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
@@ -440,7 +441,7 @@ impl Handler{
         //final setup
         let user_count = user_list.len();
         let mainpost = matrix_post.id;
-        let fullname = &(&command.channel).as_ref().context("getting channel/thread")?.name.as_ref().context("getting channel/thread name")?;
+        let fullname = command.channel.as_ref().context("getting channel/thread")?.name.as_ref().context("getting channel/thread name")?;
         let matrix = MatchMatrix{thread: command.channel_id, threadname:fullname.to_string(), mainpost, users: user_list, results};
         if matrix_post.content != render_grid(&matrix.users, &matrix.results, &matrix.threadname)?{
             matrix.thread.message(&ctx.http, matrix.mainpost).await?.edit(&ctx.http,
