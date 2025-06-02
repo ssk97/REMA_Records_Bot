@@ -51,14 +51,15 @@ type Matches = HashMap<(UserId, UserId), MatchResult>;
 struct MatchMatrixSetup{
     threadname: String,
     shortname: String,
-    users: Vec<LocalUser>
+    users: Vec<LocalUser>,
 }
 struct MatchMatrix{
     thread: ChannelId,
     threadname: String,
     mainpost: MessageId,
     users: Vec<LocalUser>,
-    results: Matches
+    results: Matches,
+    disabled_fam: HashSet<UserId>,
 }
 struct Handler{
     setup_data: DashMap<GuildId, MatchMatrixSetup>,
@@ -72,7 +73,7 @@ struct LocalUser{
     user: User,
 }
 
-fn render_grid(users: &[LocalUser], results: &Matches, header: &str) -> Result<String> {
+fn render_grid(users: &[LocalUser], results: &Matches, disabled_fam: &HashSet<UserId>, header: &str) -> Result<String> {
     let mut message_str = header.to_string();
     message_str += "\n";
     for y in users{
@@ -90,7 +91,7 @@ fn render_grid(users: &[LocalUser], results: &Matches, header: &str) -> Result<S
             }
             message_str.push(' ');
         }
-        message_str.push_str(&format!("{}/{} {}\n", wins, matches, &y.name));
+        message_str.push_str(&format!("{}/{} {}{}\n", wins, matches, &y.name, if disabled_fam.contains(&y.id) {":no_bell:"} else {""}));
     }
     for user in users{
         let c = user.name.to_ascii_lowercase().chars().find(|x| x.is_ascii_alphanumeric());
@@ -216,15 +217,15 @@ impl Handler{
                 results.insert((x.id, y.id), result);
             }
         }
-        let mainpost = thread.say(&ctx.http, render_grid(&setup.users, &results, &setup.threadname)?).await?.id;
+        let mainpost = thread.say(&ctx.http, render_grid(&setup.users, &results, &HashSet::new(), &setup.threadname)?).await?.id;
 
         thread.say(&ctx.http, ":cloud: match available\n:full_moon: match won 2-0\n:waning_gibbous_moon: match won 2-1\n\
             :waxing_crescent_moon: match lost 1-2\n:new_moon: match lost 0-2\n:black_small_square: cannot play yourself").await?;
 
         let mut match_vec = self.match_data.entry(guild).or_insert(HashMap::new());
-        let matrix = MatchMatrix{thread: thread.id, threadname:setup.threadname, mainpost, users: setup.users, results};
+        let matrix = MatchMatrix{thread: thread.id, threadname:setup.threadname, mainpost, users: setup.users, results, disabled_fam: HashSet::new()};
         match_vec.insert(setup.shortname, matrix);
-        self.reset_tournament_commands(ctx, &guild, &match_vec).await?;
+        Self::reset_tournament_commands(ctx, &guild, &match_vec).await?;
 
         Ok("Success!".to_string())
     }
@@ -285,7 +286,7 @@ impl Handler{
         **x2 = result;
         matrix.thread.say(&ctx.http, format!("{} reports {} {} {}", reporter_user, player.name, result_str, opponent.name)).await?;
         matrix.thread.message(&ctx.http, matrix.mainpost).await?.edit(&ctx.http, 
-            EditMessage::new().content(render_grid(&matrix.users, &matrix.results, &matrix.threadname)?)).await?;
+            EditMessage::new().content(render_grid(&matrix.users, &matrix.results, &matrix.disabled_fam, &matrix.threadname)?)).await?;
         Ok("Success".to_string())
     }
 
@@ -299,27 +300,38 @@ impl Handler{
         }) = options.get(0) else {return Err(anyhow!("name not found in end setup"));};
 
         let matchup = match_data_list.get(*commandshortname).context(format!("unable to find given name {} in match list", commandshortname))?;
-        command.channel_id.say(&ctx.http, render_grid(&matchup.users, &matchup.results, &matchup.threadname)?).await?;
+        command.channel_id.say(&ctx.http, render_grid(&matchup.users, &matchup.results, &HashSet::new(), &matchup.threadname)?).await?;
         match_data_list.remove(*commandshortname);
-        self.reset_tournament_commands(ctx, &guild, &match_data_list).await?;
+        Self::reset_tournament_commands(ctx, &guild, &match_data_list).await?;
         Ok("Success".to_string())
     }
 
-    async fn reset_tournament_commands(&self, ctx: &Context, guild: &GuildId, tournaments: &HashMap<String, MatchMatrix>) -> Result<()>{
+    async fn reset_tournament_commands(ctx: &Context, guild: &GuildId, tournaments: &HashMap<String, MatchMatrix>) -> Result<()>{
         //Returns the delta in number of tournament report commands
-        let mut fam_options = CreateCommandOption::new(CommandOptionType::String, "tournament", "Ping only one tournament's opponents");
-        let mut ping_options = CreateCommandOption::new(CommandOptionType::String, "tournament", "Ping a tournament").required(true);
-        let mut end_options = CreateCommandOption::new(CommandOptionType::String, "tournament", "The tournament to end").required(true);
+        let mut fam_user_options = CreateCommandOption::new(CommandOptionType::String, "tournament", "Ping which opponents").required(true);
+        let mut findable_user_options = CreateCommandOption::new(CommandOptionType::String, "tournament", "Which tournaments to enable/disable Find A Match pings?").required(true);
+        let mut ping_user_options = CreateCommandOption::new(CommandOptionType::String, "tournament", "Ping a tournament").required(true);
+        let mut end_user_options = CreateCommandOption::new(CommandOptionType::String, "tournament", "The tournament to end").required(true);
+        fam_user_options = fam_user_options.add_string_choice("All tournaments", "");
+        findable_user_options = findable_user_options.add_string_choice("All tournaments", "");
         for (shortname, longname) in tournaments.iter().map(|(key, val)| (key, &val.threadname)){
-            fam_options = fam_options.add_string_choice(longname, shortname);
-            ping_options = ping_options.add_string_choice(longname, shortname);
-            end_options = end_options.add_string_choice(longname, shortname);
+            fam_user_options = fam_user_options.add_string_choice(longname, shortname);
+            findable_user_options = findable_user_options.add_string_choice(longname, shortname);
+            ping_user_options = ping_user_options.add_string_choice(longname, shortname);
+            end_user_options = end_user_options.add_string_choice(longname, shortname);
         }
+        let findable_enable_option = CreateCommandOption::new(CommandOptionType::Boolean, "findable", "Do you want to allow pings (true) or disable them (false)?").required(true);
+
         let mut commands = vec![
-            CreateCommand::new("fam").description("Ping other players that you haven't played yet").add_option(fam_options),
-            CreateCommand::new("ping").description("Ping other players that you haven't played yet").add_option(ping_options),            
+            CreateCommand::new("fam").description("Find A Match: Ping other players that you haven't played yet")
+                .add_option(fam_user_options),
+            CreateCommand::new("findable").description("Enable or disable pinging for Find A Match")
+                .add_option(findable_user_options).add_option(findable_enable_option),
+            CreateCommand::new("ping").description("Silent ping all players of a tournament")
+                .default_member_permissions(Permissions::MODERATE_MEMBERS).add_option(ping_user_options),            
             CreateCommand::new("end").description("End a match matrix, posting final results in this channel")
-                .default_member_permissions(Permissions::MODERATE_MEMBERS).add_option(end_options)];
+                .default_member_permissions(Permissions::MODERATE_MEMBERS).add_option(end_user_options)
+            ];
 
         for (shortname, tournament_matrix) in tournaments.iter(){
             let mut player_options = CreateCommandOption::new(CommandOptionType::String, "opponent", "Who was your opponent").required(true);
@@ -375,8 +387,12 @@ impl Handler{
             for opponent in &matrix.users{
                 //Self is MatchResult::Unplayable so no need to special case it
                 if matrix.results.get(&(playerid, opponent.id)) == Some(&MatchResult::NotPlayed) {
-                    message_str += &format!("<@{}> ", opponent.id);
-                    mentions.insert(opponent.id);
+                    if matrix.disabled_fam.contains(&opponent.id){
+                        message_str += &format!("{} ", opponent.name);
+                    } else {
+                        message_str += &format!("<@{}> ", opponent.id);
+                        mentions.insert(opponent.id);
+                    }
                     found_any = true;
                 }
             }
@@ -407,6 +423,35 @@ impl Handler{
         Ok("Success".to_string())
     }
 
+    async fn findable(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
+        let options = &command.data.options();
+        let guild = command.guild_id.context("guild not found for ping")?;
+        let Some(mut match_data_list) = self.match_data.get_mut(&guild) else { return Err(anyhow!("guild has no match matrices"));};
+        let playerid = command.user.id;
+
+        let Some(ResolvedOption {
+            value: ResolvedValue::String(commandshortname), ..
+        }) = options.get(0) else {return Err(anyhow!("command name argument missing"));};
+        let Some(ResolvedOption {
+            value: ResolvedValue::Boolean(enable), ..
+        }) = options.get(1) else {return Err(anyhow!("enable argument missing"));};
+
+        let mut count:i32 = 0;
+        for (shortname, matrix) in match_data_list.iter_mut(){
+            if commandshortname.is_empty() || commandshortname == shortname{
+                if lookup_userid(playerid, &matrix.users).is_some(){
+                    let result = if *enable {matrix.disabled_fam.remove(&playerid)} else {matrix.disabled_fam.insert(playerid)};
+                    if result {
+                        count += 1;
+                        matrix.thread.message(&ctx.http, matrix.mainpost).await?.edit(&ctx.http, 
+                            EditMessage::new().content(render_grid(&matrix.users, &matrix.results, &matrix.disabled_fam, &matrix.threadname)?)).await?;
+                    }
+                }
+            }
+        }
+        Ok(format!("Success - {} findable statuses changed", count))
+    }
+
     async fn reprocess(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
         let guild = command.guild_id.context("guild not found for reprocess")?;
         let messages = ctx.http.get_messages(command.channel_id, None, Some(100)).await?;
@@ -418,10 +463,12 @@ impl Handler{
         let content_match = RE_INTRO.captures(intro).context("intro message does not match expected")?;
         let user_str_list = content_match[1].split(" ");
         let mut user_list = Vec::new();
+        let mut disabled_fam = HashSet::new();
         for str in user_str_list{
             static RE_USERID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<@(\d+)>").unwrap());
             if let Some(user_match) = RE_USERID.captures(str){
-                user_list.push(member_to_user(&guild.member(&ctx.http, UserId::new(user_match[1].parse()?)).await?));
+                let user = UserId::new(user_match[1].parse()?);
+                user_list.push(member_to_user(&guild.member(&ctx.http, user).await?));
             }
         }
         let shortname = &content_match[2];
@@ -436,20 +483,24 @@ impl Handler{
                     .context(format!("Unable to find match results matrix content: {} for {},{}", &matrix_post.content, x.name, y.name))?.as_str());
                 results.insert((x.id, y.id), result);
             }
+            if matrix_post.content.contains(&format!("{}:no_bell:", y.name)) {
+                disabled_fam.insert(y.id);
+            }
         }
 
         //final setup
         let user_count = user_list.len();
         let mainpost = matrix_post.id;
         let fullname = command.channel.as_ref().context("getting channel/thread")?.name.as_ref().context("getting channel/thread name")?;
-        let matrix = MatchMatrix{thread: command.channel_id, threadname:fullname.to_string(), mainpost, users: user_list, results};
-        if matrix_post.content != render_grid(&matrix.users, &matrix.results, &matrix.threadname)?{
+        let matrix = MatchMatrix{thread: command.channel_id, threadname:fullname.to_string(), mainpost, users: user_list, results, disabled_fam};
+        let render_result = render_grid(&matrix.users, &matrix.results, &matrix.disabled_fam, &matrix.threadname)?;
+        if matrix_post.content != render_result {
             matrix.thread.message(&ctx.http, matrix.mainpost).await?.edit(&ctx.http,
-                EditMessage::new().content(render_grid(&matrix.users, &matrix.results, &matrix.threadname)?)).await?;
+                EditMessage::new().content(render_result)).await?;
         }
         let mut match_vec = self.match_data.entry(guild).or_insert(HashMap::new());
         match_vec.insert(shortname.to_string(), matrix);
-        self.reset_tournament_commands(ctx, &guild, &match_vec).await?;
+        Self::reset_tournament_commands(ctx, &guild, &match_vec).await?;
         
         Ok(format!("Processed {} ({}) with {} users - currently running {} tournaments", fullname, shortname, user_count, match_vec.len()))
     }
@@ -485,6 +536,7 @@ impl EventHandler for Handler {
                 "reprocess" => self.reprocess(&ctx, &command).await,
                 "ping" => self.ping(&ctx, &command).await,
                 "fam" => self.fam_pings(&ctx, &command).await,
+                "findable" => self.findable(&ctx, &command).await,
                 _ => self.report_result_command(&ctx, &command).await,
             };
             let response2 = command.edit_response(&ctx.http, EditInteractionResponse::new().content(
