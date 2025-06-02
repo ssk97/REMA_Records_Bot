@@ -4,6 +4,7 @@ use serenity::all::*;
 use anyhow::{Result, Context as _, anyhow}; //overrides serenity Result
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::LazyLock;
 use dashmap::DashMap;
 use regex::Regex;
@@ -190,25 +191,9 @@ impl Handler{
         Ok("Success".to_string())
     }
 
-    async fn register_match_command(ctx: &Context, guild: &GuildId, users: &[LocalUser], fullname: &str, shortname: &str) -> Result<()>{
-        let mut player_options = CreateCommandOption::new(CommandOptionType::String, "opponent", "Who was your opponent").required(true);
-        for user in users{
-            player_options = player_options.add_string_choice(&user.name, user.id.to_string());
-        }
-        guild.create_command(&ctx.http, CreateCommand::new(shortname)
-        .description(format!("Submit result for {}", &fullname))
-        .add_option(
-            CreateCommandOption::new(CommandOptionType::String, "score", "What was the match score (you first)")
-            .add_string_choice("2-0 (Win)", "2-0").add_string_choice("2-1 (Win)", "2-1")
-            .add_string_choice("1-2 (Loss)", "1-2").add_string_choice("0-2 (Loss)", "0-2")
-            .add_string_choice("0-0 (No result)", "0-0").required(true)
-        ).add_option(player_options)).await?;
-        Ok(())
-    }
-
     async fn create(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
         let guild = command.guild_id.context("guild not found in create")?;
-        let setup = self.setup_data.get(&guild).context("Create called when not doing setup!")?;
+        let (_, setup) = self.setup_data.remove(&guild).context("Create called but setup data not found!")?;
         let thread_builder = CreateThread::new(&setup.threadname)
             .kind(ChannelType::PublicThread);
         let thread = command.channel_id.create_thread(&ctx.http, thread_builder).await?;
@@ -219,6 +204,7 @@ impl Handler{
         }
         thread.send_message(&ctx.http, CreateMessage::new()
             .allowed_mentions(CreateAllowedMentions::new().users(setup.users.iter().map(|x| &x.user).into_iter()))
+            .flags(MessageFlags::SUPPRESS_NOTIFICATIONS)
             .content(initial_message_str+" Report your results here using the command /"+&setup.shortname+" or /result"))
             .await?;
 
@@ -230,16 +216,14 @@ impl Handler{
             }
         }
         let mainpost = thread.say(&ctx.http, render_grid(&setup.users, &results, &setup.threadname)?).await?.id;
-        Self::register_match_command(ctx, &guild, &setup.users, &setup.threadname, &setup.shortname).await?;
 
         thread.say(&ctx.http, ":cloud: match available\n:full_moon: match won 2-0\n:waning_gibbous_moon: match won 2-1\n\
             :waxing_crescent_moon: match lost 1-2\n:new_moon: match lost 0-2\n:black_small_square: cannot play yourself").await?;
 
-        drop(setup); //Prevent deadlock
-        let (_, setup) = self.setup_data.remove(&guild).context("setup data not found to remove!")?;
         let mut match_vec = self.match_data.entry(guild).or_insert(HashMap::new());
         let matrix = MatchMatrix{thread: thread.id, threadname:setup.threadname, mainpost, users: setup.users, results};
         match_vec.insert(setup.shortname, matrix);
+        self.reset_tournament_commands(ctx, &guild, &match_vec).await?;
 
         Ok("Success!".to_string())
     }
@@ -309,29 +293,121 @@ impl Handler{
         let guild = command.guild_id.context("guild not found for end")?;
         let Some(mut match_data_list) = self.match_data.get_mut(&guild) else { return Err(anyhow!("guild has no match matrices"));};
 
-        let commands_list = guild.get_commands(&ctx.http).await?;
         let Some(ResolvedOption {
             value: ResolvedValue::String(commandshortname), ..
-        }) = options.get(0) else {return Err(anyhow!("name not found in begin setup"));};
+        }) = options.get(0) else {return Err(anyhow!("name not found in end setup"));};
 
         let matchup = match_data_list.get(*commandshortname).context("unable to find given name in match list")?;
-        for slashcommand in &commands_list {
-            if &slashcommand.name == commandshortname{
-                guild.delete_command(&ctx.http, slashcommand.id).await?;
-                command.channel_id.say(&ctx.http, render_grid(&matchup.users, &matchup.results, &matchup.threadname)?).await?;
-                match_data_list.remove(*commandshortname);
-                return Ok("Success".to_string());
+        command.channel_id.say(&ctx.http, render_grid(&matchup.users, &matchup.results, &matchup.threadname)?).await?;
+        match_data_list.remove(*commandshortname);
+        self.reset_tournament_commands(ctx, &guild, &match_data_list).await?;
+        return Ok("Success".to_string());
+    }
+
+    async fn reset_tournament_commands(&self, ctx: &Context, guild: &GuildId, tournaments: &HashMap<String, MatchMatrix>) -> Result<()>{
+        //Returns the delta in number of tournament report commands
+        let mut fam_options = CreateCommandOption::new(CommandOptionType::String, "tournament", "Ping only one tournament's opponents");
+        let mut ping_options = CreateCommandOption::new(CommandOptionType::String, "tournament", "Ping a tournament").required(true);
+        let mut end_options = CreateCommandOption::new(CommandOptionType::String, "tournament", "The tournament to end").required(true);
+        for (shortname, longname) in tournaments.iter().map(|(key, val)| (key, &val.threadname)){
+            fam_options = fam_options.add_string_choice(shortname, longname);
+            ping_options = ping_options.add_string_choice(shortname, longname);
+            end_options = end_options.add_string_choice(shortname, longname);
+        }
+        let mut commands = vec![
+            CreateCommand::new("fam").description("Ping other players that you haven't played yet").add_option(fam_options),
+            CreateCommand::new("ping").description("Ping other players that you haven't played yet").add_option(ping_options),            
+            CreateCommand::new("end").description("End a match matrix, posting final results in this channel")
+                .default_member_permissions(Permissions::MODERATE_MEMBERS).add_option(end_options)];
+
+        for (shortname, tournament_matrix) in tournaments.iter(){
+            let mut player_options = CreateCommandOption::new(CommandOptionType::String, "opponent", "Who was your opponent").required(true);
+            for user in &tournament_matrix.users{
+                player_options = player_options.add_string_choice(&user.name, user.id.to_string());
+            }
+            commands.push(CreateCommand::new(shortname)
+            .description(format!("Submit result for {}", &tournament_matrix.threadname))
+            .add_option(
+                CreateCommandOption::new(CommandOptionType::String, "score", "What was the match score (you first)")
+                .add_string_choice("2-0 (Win)", "2-0").add_string_choice("2-1 (Win)", "2-1")
+                .add_string_choice("1-2 (Loss)", "1-2").add_string_choice("0-2 (Loss)", "0-2")
+                .add_string_choice("0-0 (No result)", "0-0").required(true)
+            ).add_option(player_options));
+        }
+        guild.set_commands(&ctx.http, commands).await?;
+        return Ok(());
+    }
+
+    async fn ping(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
+        let options = &command.data.options();
+        let guild = command.guild_id.context("guild not found for ping")?;
+        let Some(match_data_list) = self.match_data.get(&guild) else { return Err(anyhow!("guild has no match matrices"));};
+
+        let Some(ResolvedOption {
+            value: ResolvedValue::String(commandshortname), ..
+        }) = options.get(0) else {return Err(anyhow!("name not found in ping setup"));};
+
+        let matchup = match_data_list.get(*commandshortname).context("unable to find given name in match list")?;
+        let mut message_str = String::new();
+        for user in &matchup.users{
+            message_str = message_str+"<@"+&user.id.to_string()+"> ";
+        }
+        command.channel_id.send_message(&ctx.http, CreateMessage::new()
+                .allowed_mentions(CreateAllowedMentions::new().users(matchup.users.iter().map(|x| &x.user).into_iter()))
+                .flags(MessageFlags::SUPPRESS_NOTIFICATIONS)
+                .content(message_str))
+                .await?;
+        return Ok("Success".to_string());
+    }
+
+    async fn fam_pings(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
+        let options = &command.data.options();
+        let guild = command.guild_id.context("guild not found for ping")?;
+        let Some(match_data_list) = self.match_data.get(&guild) else { return Err(anyhow!("guild has no match matrices"));};
+        let playerid = command.user.id;
+        let mut mentions = HashSet::new();
+
+        fn get_opponents(playerid: UserId, matrix: &MatchMatrix, mentions: &mut HashSet<UserId>) -> Option<String> {
+            let _ = lookup_userid(playerid, &matrix.users)?;
+            let mut message_str = String::new();
+            let mut found_any = false;
+            for opponent in &matrix.users{
+                //Self is MatchResult::Unplayable so no need to special case it
+                if matrix.results.get(&(playerid, opponent.id)) == Some(&MatchResult::NotPlayed) {
+                    message_str = message_str+"<@"+&opponent.id.to_string()+"> ";
+                    mentions.insert(opponent.id);
+                    found_any = true;
+                }
+            }
+            if !found_any {return Some(String::from("All matches complete!"));}
+            return Some(message_str);
+        }
+
+        let mut output = format!("{} is trying to find a match to play, is anyone available?", playerid);
+        let commandshortname = match options.get(0){
+            Some(ResolvedOption {
+                value: ResolvedValue::String(commandshortname), ..
+            }) => commandshortname,
+            None => "",
+            _ => return Err(anyhow!("Bad command arguments"))
+        };
+        for (shortname, matrix) in match_data_list.iter(){
+            if commandshortname == "" || commandshortname == shortname{
+                if let Some(opponents_string) = get_opponents(playerid, matrix, &mut mentions){
+                    output += &format!("\n{}: {}", shortname, &opponents_string);
+                }
             }
         }
-        Err(anyhow!("Unable to find matchup in data"))
+        command.channel_id.send_message(&ctx.http, CreateMessage::new()
+                .allowed_mentions(CreateAllowedMentions::new().users(mentions.iter()))
+                .content(output))
+                .await?;
+
+        return Ok("Success".to_string());
     }
 
     async fn reprocess(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
         let guild = command.guild_id.context("guild not found for reprocess")?;
-        let mut match_vec = self.match_data.entry(guild).or_insert(HashMap::new());
-        if match_vec.len() == 0{
-            guild.set_commands(&ctx.http, vec![]).await?;
-        }
         let messages = ctx.http.get_messages(command.channel_id, None, Some(100)).await?;
         let intro = &messages.get(messages.len()-1).context("intro message not found")?.content;
         let matrix_post = &messages.get(messages.len()-2).context("matrix message not found")?;
@@ -365,16 +441,16 @@ impl Handler{
         let user_count = user_list.len();
         let mainpost = matrix_post.id;
         let fullname = &(&command.channel).as_ref().context("getting channel/thread")?.name.as_ref().context("getting channel/thread name")?;
-        Self::register_match_command(ctx, &guild, &user_list, fullname, shortname).await?;
-
         let matrix = MatchMatrix{thread: command.channel_id, threadname:fullname.to_string(), mainpost, users: user_list, results};
         if matrix_post.content != render_grid(&matrix.users, &matrix.results, &matrix.threadname)?{
             matrix.thread.message(&ctx.http, matrix.mainpost).await?.edit(&ctx.http,
                 EditMessage::new().content(render_grid(&matrix.users, &matrix.results, &matrix.threadname)?)).await?;
         }
+        let mut match_vec = self.match_data.entry(guild).or_insert(HashMap::new());
+        self.reset_tournament_commands(ctx, &guild, &match_vec).await?;
         match_vec.insert(shortname.to_string(), matrix);
         
-        Ok(format!("Processed {} ({}) with {} users", fullname, shortname, user_count))
+        Ok(format!("Processed {} ({}) with {} users - currently running {} tournaments", fullname, shortname, user_count, match_vec.len()))
     }
 }
 #[async_trait]
@@ -406,6 +482,8 @@ impl EventHandler for Handler {
                 "end" => self.end(&ctx, &command).await,
                 "result" => self.report_result_any(&ctx, &command).await,
                 "reprocess" => self.reprocess(&ctx, &command).await,
+                "ping" => self.ping(&ctx, &command).await,
+                "fam" => self.fam_pings(&ctx, &command).await,
                 _ => self.report_result_command(&ctx, &command).await,
             };
             let response2 = command.edit_response(&ctx.http, EditInteractionResponse::new().content(
@@ -419,9 +497,9 @@ impl EventHandler for Handler {
         }
     }
 
-    async fn ready(&self, ctx: Context, ready: Ready) {
+    async fn ready(&self, ctx: Context, _ready: Ready) {
         //Only need to do this once (or if I change the commands)
-        /*let result = Command::set_global_commands(&ctx.http, vec![
+        let result = Command::set_global_commands(&ctx.http, vec![
             CreateCommand::new("begin").description("Begin setting up a new match matrix")
                 .default_member_permissions(Permissions::MODERATE_MEMBERS)
                 .add_option(CreateCommandOption::new(CommandOptionType::String, "title", "The name of the thread to make").required(true))
@@ -442,9 +520,6 @@ impl EventHandler for Handler {
                 .default_member_permissions(Permissions::MODERATE_MEMBERS),
             CreateCommand::new("cancel").description("Cancel the current match matrix setup")
                 .default_member_permissions(Permissions::MODERATE_MEMBERS),
-            CreateCommand::new("end").description("End a match matrix, posting final results in this channel")
-                .default_member_permissions(Permissions::MODERATE_MEMBERS)
-                .add_option(CreateCommandOption::new(CommandOptionType::String, "cmd", "The command-name of the tournament to end").required(true)),
             CreateCommand::new("reprocess").description("Read this channel's matrix info into storage. Also resets unavailable report commands")
                 .default_member_permissions(Permissions::MODERATE_MEMBERS),
             CreateCommand::new("result").description("Report a match result with arbitrary users for the current results thread")
@@ -457,7 +532,7 @@ impl EventHandler for Handler {
             ]).await;
         if let Err(why) = result {
             println!("Error setting up global commands: {why:?}");
-        }*/
+        }
     }
 }
 
