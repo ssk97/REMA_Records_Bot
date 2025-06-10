@@ -320,12 +320,15 @@ impl Handler{
             ping_user_options = ping_user_options.add_string_choice(longname, shortname);
             end_user_options = end_user_options.add_string_choice(longname, shortname);
         }
-        let findable_enable_option = CreateCommandOption::new(CommandOptionType::Boolean, "findable", "Do you want to allow pings (true) or disable them (false)?").required(true);
+        let findable_enable_option = CreateCommandOption::new(CommandOptionType::Integer, "enable", "Do you want to allow Find A Match pings (on) or prevent them (off)?")
+            .required(true).add_int_choice("on", 1).add_int_choice("off", 0);
+        let restrict_fam_ping = CreateCommandOption::new(CommandOptionType::Integer, "exclude", "Don't ping a given group of players")
+            .add_int_choice("our strongest players", 1).add_int_choice("everybody else", 2);
 
         let mut commands = vec![
             CreateCommand::new("fam").description("Find A Match: Ping other players that you haven't played yet")
-                .add_option(fam_user_options),
-            CreateCommand::new("findable").description("Enable or disable pinging for Find A Match")
+                .add_option(fam_user_options).add_option(restrict_fam_ping),
+            CreateCommand::new("matchpings").description("Enable or disable pinging for Find A Match")
                 .add_option(findable_user_options).add_option(findable_enable_option),
             CreateCommand::new("ping").description("Silent ping all players of a tournament")
                 .default_member_permissions(Permissions::MODERATE_MEMBERS).add_option(ping_user_options),            
@@ -373,6 +376,7 @@ impl Handler{
         Ok("Success".to_string())
     }
 
+
     async fn fam_pings(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
         let options = &command.data.options();
         let guild = command.guild_id.context("guild not found for ping")?;
@@ -380,14 +384,29 @@ impl Handler{
         let playerid = command.user.id;
         let mut mentions = HashSet::new();
 
-        fn get_opponents(playerid: UserId, matrix: &MatchMatrix, mentions: &mut HashSet<UserId>) -> Option<String> {
+
+        #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+        enum RestrictValues {
+            NoRestriction, ExcludeDangerous, ExcludeNormal
+        }
+        fn get_opponents(playerid: UserId, matrix: &MatchMatrix, mentions: &mut HashSet<UserId>, restrict: RestrictValues) -> Option<String> {
             let _ = lookup_userid(playerid, &matrix.users)?;
             let mut message_str = String::new();
             let mut found_any = false;
+            const DANGEROUS_LIST: [UserId; 4] =[
+                UserId::new(183433751689166850), //notgreat
+                UserId::new(1165425089676849182), //inuenc
+                UserId::new(643842082435235862), //Nibiru
+                UserId::new(249299939522248704)]; //coopergfrye 
             for opponent in &matrix.users{
                 //Self is MatchResult::Unplayable so no need to special case it
                 if matrix.results.get(&(playerid, opponent.id)) == Some(&MatchResult::NotPlayed) {
-                    if matrix.disabled_fam.contains(&opponent.id){
+                    let restricted_result = match restrict {
+                        RestrictValues::NoRestriction => false,
+                        RestrictValues::ExcludeDangerous => DANGEROUS_LIST.contains(&opponent.id),
+                        RestrictValues::ExcludeNormal => !DANGEROUS_LIST.contains(&opponent.id),
+                    };
+                    if matrix.disabled_fam.contains(&opponent.id) || restricted_result{
                         message_str += &format!("{} ", opponent.name);
                     } else {
                         message_str += &format!("<@{}> ", opponent.id);
@@ -408,9 +427,23 @@ impl Handler{
             None => "",
             _ => return Err(anyhow!("Bad command arguments"))
         };
+        let restrict = match options.get(1){
+            Some(ResolvedOption {
+                value: ResolvedValue::Integer(restrict_str), ..
+            }) => *restrict_str,
+            None => 0,
+            _ => return Err(anyhow!("Bad command arguments"))
+        };
+        let restrict = match restrict {
+            0 => RestrictValues::NoRestriction,
+            1 => RestrictValues::ExcludeDangerous,
+            2 => RestrictValues::ExcludeNormal,
+            _=> return Err(anyhow!("Unexpected restrict value"))
+        };
+
         for (shortname, matrix) in match_data_list.iter(){
             if commandshortname.is_empty() || commandshortname == shortname{
-                if let Some(opponents_string) = get_opponents(playerid, matrix, &mut mentions){
+                if let Some(opponents_string) = get_opponents(playerid, matrix, &mut mentions, restrict){
                     output += &format!("\n{}: {}", shortname, &opponents_string);
                 }
             }
@@ -433,19 +466,18 @@ impl Handler{
             value: ResolvedValue::String(commandshortname), ..
         }) = options.get(0) else {return Err(anyhow!("command name argument missing"));};
         let Some(ResolvedOption {
-            value: ResolvedValue::Boolean(enable), ..
+            value: ResolvedValue::Integer(enable), ..
         }) = options.get(1) else {return Err(anyhow!("enable argument missing"));};
+        let enable = *enable != 0;
 
         let mut count:i32 = 0;
         for (shortname, matrix) in match_data_list.iter_mut(){
-            if commandshortname.is_empty() || commandshortname == shortname{
-                if lookup_userid(playerid, &matrix.users).is_some(){
-                    let result = if *enable {matrix.disabled_fam.remove(&playerid)} else {matrix.disabled_fam.insert(playerid)};
-                    if result {
-                        count += 1;
-                        matrix.thread.message(&ctx.http, matrix.mainpost).await?.edit(&ctx.http, 
-                            EditMessage::new().content(render_grid(&matrix.users, &matrix.results, &matrix.disabled_fam, &matrix.threadname)?)).await?;
-                    }
+            if (commandshortname.is_empty() || commandshortname == shortname) && lookup_userid(playerid, &matrix.users).is_some(){
+                let result = if enable {matrix.disabled_fam.remove(&playerid)} else {matrix.disabled_fam.insert(playerid)};
+                if result {
+                    count += 1;
+                    matrix.thread.message(&ctx.http, matrix.mainpost).await?.edit(&ctx.http, 
+                        EditMessage::new().content(render_grid(&matrix.users, &matrix.results, &matrix.disabled_fam, &matrix.threadname)?)).await?;
                 }
             }
         }
@@ -536,7 +568,7 @@ impl EventHandler for Handler {
                 "reprocess" => self.reprocess(&ctx, &command).await,
                 "ping" => self.ping(&ctx, &command).await,
                 "fam" => self.fam_pings(&ctx, &command).await,
-                "findable" => self.findable(&ctx, &command).await,
+                "matchpings" => self.findable(&ctx, &command).await,
                 _ => self.report_result_command(&ctx, &command).await,
             };
             let response2 = command.edit_response(&ctx.http, EditInteractionResponse::new().content(
