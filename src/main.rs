@@ -399,14 +399,14 @@ impl Handler{
                 UserId::new(643842082435235862), //Nibiru
                 UserId::new(249299939522248704)]; //coopergfrye 
             for opponent in &matrix.users{
+                let restricted_result = match restrict {
+                    RestrictValues::NoRestriction => false,
+                    RestrictValues::ExcludeDangerous => DANGEROUS_LIST.contains(&opponent.id),
+                    RestrictValues::ExcludeNormal => !DANGEROUS_LIST.contains(&opponent.id),
+                };
                 //Self is MatchResult::Unplayable so no need to special case it
-                if matrix.results.get(&(playerid, opponent.id)) == Some(&MatchResult::NotPlayed) {
-                    let restricted_result = match restrict {
-                        RestrictValues::NoRestriction => false,
-                        RestrictValues::ExcludeDangerous => DANGEROUS_LIST.contains(&opponent.id),
-                        RestrictValues::ExcludeNormal => !DANGEROUS_LIST.contains(&opponent.id),
-                    };
-                    if matrix.disabled_fam.contains(&opponent.id) || restricted_result{
+                if matrix.results.get(&(playerid, opponent.id)) == Some(&MatchResult::NotPlayed) && !restricted_result{
+                    if matrix.disabled_fam.contains(&opponent.id) {
                         message_str += &format!("{} ", opponent.name);
                     } else {
                         message_str += &format!("<@{}> ", opponent.id);
