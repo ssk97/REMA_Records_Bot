@@ -56,7 +56,7 @@ struct MatchMatrixSetup{
 struct MatchMatrix{
     thread: ChannelId,
     threadname: String,
-    mainpost: MessageId,
+    mainposts: Vec<MessageId>,
     users: Vec<LocalUser>,
     results: Matches,
     disabled_fam: HashSet<UserId>,
@@ -73,10 +73,12 @@ struct LocalUser{
     user: User,
 }
 
-fn render_grid(users: &[LocalUser], results: &Matches, disabled_fam: &HashSet<UserId>, header: &str) -> Result<String> {
+fn render_grid(users: &[LocalUser], results: &Matches, disabled_fam: &HashSet<UserId>, header: &str, message_count: usize) -> Result<Vec<String>> {
+    let mut message_vec = Vec::new();
     let mut message_str = header.to_string();
-    message_str += "\n";
-    for y in users{
+    message_str.push('\n');
+    let lines_per_message = (users.len()+1)/message_count;
+    for (i, y) in users.iter().enumerate(){
         let mut wins = 0;
         let mut matches = 0;
         for x in users{
@@ -92,6 +94,10 @@ fn render_grid(users: &[LocalUser], results: &Matches, disabled_fam: &HashSet<Us
             message_str.push(' ');
         }
         message_str.push_str(&format!("{}/{} {}{}\n", wins, matches, &y.name, if disabled_fam.contains(&y.id) {":no_bell:"} else {""}));
+        if i % lines_per_message == 0{
+            message_vec.push(message_str);
+            message_str = String::new();
+        }
     }
     for user in users{
         let c = user.name.to_ascii_lowercase().chars().find(|x| x.is_ascii_alphanumeric());
@@ -107,7 +113,8 @@ fn render_grid(users: &[LocalUser], results: &Matches, disabled_fam: &HashSet<Us
         message_str.push_str(&id_square);
         message_str.push(' ');
     }
-    Ok(message_str)
+    message_vec.push(message_str);
+    Ok(message_vec)
 }
 
 fn lookup_userid(id: UserId, users: &[LocalUser]) -> Option<LocalUser>{
@@ -217,13 +224,18 @@ impl Handler{
                 results.insert((x.id, y.id), result);
             }
         }
-        let mainpost = thread.say(&ctx.http, render_grid(&setup.users, &results, &HashSet::new(), &setup.threadname)?).await?.id;
+        let msg_count = ((setup.users.len()*25)/1800)+1; //2000 character limit, 25 characters per user plus some wiggle room to be safe
+        let mut mainposts = Vec::new();
+        let messages = render_grid(&setup.users, &results, &HashSet::new(), &setup.threadname, msg_count)?;
+        for msg in messages{
+            mainposts.push(thread.say(&ctx.http, msg).await?.id);
+        }
 
         thread.say(&ctx.http, ":cloud: match available\n:full_moon: match won 2-0\n:waning_gibbous_moon: match won 2-1\n\
             :waxing_crescent_moon: match lost 1-2\n:new_moon: match lost 0-2\n:black_small_square: cannot play yourself").await?;
 
         let mut match_vec = self.match_data.entry(guild).or_insert(HashMap::new());
-        let matrix = MatchMatrix{thread: thread.id, threadname:setup.threadname, mainpost, users: setup.users, results, disabled_fam: HashSet::new()};
+        let matrix = MatchMatrix{thread: thread.id, threadname:setup.threadname, mainposts, users: setup.users, results, disabled_fam: HashSet::new()};
         match_vec.insert(setup.shortname, matrix);
         Self::reset_tournament_commands(ctx, &guild, &match_vec).await?;
 
@@ -285,8 +297,11 @@ impl Handler{
         let x2 = &mut matrix.results.get_mut(&(opponent.id, player.id)).context("reverse match not found - wtf?")?;
         **x2 = result;
         matrix.thread.say(&ctx.http, format!("{} reports {} {} {}", reporter_user, player.name, result_str, opponent.name)).await?;
-        matrix.thread.message(&ctx.http, matrix.mainpost).await?.edit(&ctx.http, 
-            EditMessage::new().content(render_grid(&matrix.users, &matrix.results, &matrix.disabled_fam, &matrix.threadname)?)).await?;
+
+        let messages = render_grid(&matrix.users, &matrix.results, &matrix.disabled_fam, &matrix.threadname, matrix.mainposts.len())?;
+        for (msg, post) in messages.iter().zip(&matrix.mainposts){
+            matrix.thread.message(&ctx.http, post).await?.edit(&ctx.http, EditMessage::new().content(msg)).await?;
+        }
         Ok("Success".to_string())
     }
 
@@ -300,7 +315,10 @@ impl Handler{
         }) = options.get(0) else {return Err(anyhow!("name not found in end setup"));};
 
         let matchup = match_data_list.get(*commandshortname).context(format!("unable to find given name {} in match list", commandshortname))?;
-        command.channel_id.say(&ctx.http, render_grid(&matchup.users, &matchup.results, &HashSet::new(), &matchup.threadname)?).await?;
+        let messages = render_grid(&matchup.users, &matchup.results, &HashSet::new(), &matchup.threadname, matchup.mainposts.len())?;
+        for msg in messages{
+            command.channel_id.say(&ctx.http, msg).await?;
+        }
         match_data_list.remove(*commandshortname);
         Self::reset_tournament_commands(ctx, &guild, &match_data_list).await?;
         Ok("Success".to_string())
@@ -476,8 +494,10 @@ impl Handler{
                 let result = if enable {matrix.disabled_fam.remove(&playerid)} else {matrix.disabled_fam.insert(playerid)};
                 if result {
                     count += 1;
-                    matrix.thread.message(&ctx.http, matrix.mainpost).await?.edit(&ctx.http, 
-                        EditMessage::new().content(render_grid(&matrix.users, &matrix.results, &matrix.disabled_fam, &matrix.threadname)?)).await?;
+                    let messages = render_grid(&matrix.users, &matrix.results, &matrix.disabled_fam, &matrix.threadname, matrix.mainposts.len())?;
+                    for (msg, post) in messages.iter().zip(&matrix.mainposts){
+                        matrix.thread.message(&ctx.http, post).await?.edit(&ctx.http, EditMessage::new().content(msg)).await?;
+                    }
                 }
             }
         }
@@ -486,9 +506,8 @@ impl Handler{
 
     async fn reprocess(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
         let guild = command.guild_id.context("guild not found for reprocess")?;
-        let messages = ctx.http.get_messages(command.channel_id, None, Some(100)).await?;
+        let messages = command.channel_id.messages(ctx, GetMessages::new().after(0)).await?;
         let intro = &messages.get(messages.len()-1).context("intro message not found")?.content;
-        let matrix_post = &messages.get(messages.len()-2).context("matrix message not found")?;
 
         //Read intro post for users and command name
         static RE_INTRO: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(.*) Report your results here using the command /([^ ]+) or /result").unwrap());
@@ -507,29 +526,37 @@ impl Handler{
 
         //Read the matrix results
         let mut results = HashMap::new();
+        let mut mainposts = Vec::new();
+        let mut message_offset = 2;
+        let mut total_matrix = String::new();
         static RE_MATCH_ICONS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r":cloud:|:full_moon:|:waning_gibbous_moon:|:waxing_crescent_moon:|:new_moon:|:black_small_square:").unwrap());
-        let mut matrix_match = RE_MATCH_ICONS.find_iter(&matrix_post.content);
+        loop {
+            let Some(matrix_post) = &messages.get(messages.len()-message_offset) else { break };
+            if !matrix_post.content.contains(":black_small_square:") { break }
+            mainposts.push(matrix_post.id);
+            total_matrix.push_str(&matrix_post.content);
+            message_offset += 1;
+        }
+        let mut matrix_match = RE_MATCH_ICONS.find_iter(&total_matrix);
         for y in &user_list{
             for x in &user_list{
                 let result = MatchResult::get(matrix_match.next()
-                    .context(format!("Unable to find match results matrix content: {} for {},{}", &matrix_post.content, x.name, y.name))?.as_str());
+                    .context(format!("Unable to find match results matrix content: {} for {},{}", &total_matrix, x.name, y.name))?.as_str());
                 results.insert((x.id, y.id), result);
             }
-            if matrix_post.content.contains(&format!("{}:no_bell:", y.name)) {
+            if total_matrix.contains(&format!("{}:no_bell:", y.name)) {
                 disabled_fam.insert(y.id);
             }
+        }
+        let count = matrix_match.count();
+        if count != 6 { //The message explaining the meanings of the symbols
+            return Err(anyhow!("Symbol count in match matrix did not match expected: {} excess symbols found but expected 6", count));
         }
 
         //final setup
         let user_count = user_list.len();
-        let mainpost = matrix_post.id;
         let fullname = command.channel.as_ref().context("getting channel/thread")?.name.as_ref().context("getting channel/thread name")?;
-        let matrix = MatchMatrix{thread: command.channel_id, threadname:fullname.to_string(), mainpost, users: user_list, results, disabled_fam};
-        let render_result = render_grid(&matrix.users, &matrix.results, &matrix.disabled_fam, &matrix.threadname)?;
-        if matrix_post.content != render_result {
-            matrix.thread.message(&ctx.http, matrix.mainpost).await?.edit(&ctx.http,
-                EditMessage::new().content(render_result)).await?;
-        }
+        let matrix = MatchMatrix{thread: command.channel_id, threadname:fullname.to_string(), mainposts, users: user_list, results, disabled_fam};
         let mut match_vec = self.match_data.entry(guild).or_insert(HashMap::new());
         match_vec.insert(shortname.to_string(), matrix);
         Self::reset_tournament_commands(ctx, &guild, &match_vec).await?;
