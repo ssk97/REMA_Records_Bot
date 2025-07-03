@@ -7,7 +7,7 @@ use anyhow::{Result, Context as _, anyhow}; //overrides serenity Result
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::LazyLock;
-use dashmap::DashMap;
+use scc::HashMap as SCCHashMap;
 use regex::Regex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,8 +62,8 @@ struct MatchMatrix{
     disabled_fam: HashSet<UserId>,
 }
 struct Handler{
-    setup_data: DashMap<GuildId, MatchMatrixSetup>,
-    match_data: DashMap<GuildId, HashMap<String, MatchMatrix>>
+    setup_data: SCCHashMap<GuildId, MatchMatrixSetup>,
+    match_data: SCCHashMap<GuildId, HashMap<String, MatchMatrix>>
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,7 +78,8 @@ fn render_grid(users: &[LocalUser], results: &Matches, disabled_fam: &HashSet<Us
     let mut message_str = header.to_string();
     message_str.push('\n');
     let lines_per_message = (users.len()+1)/message_count;
-    for (i, y) in users.iter().enumerate(){
+    let mut i = 0;
+    for y in users.iter(){
         let mut wins = 0;
         let mut matches = 0;
         for x in users{
@@ -94,9 +95,11 @@ fn render_grid(users: &[LocalUser], results: &Matches, disabled_fam: &HashSet<Us
             message_str.push(' ');
         }
         message_str.push_str(&format!("{}/{} {}{}\n", wins, matches, &y.name, if disabled_fam.contains(&y.id) {":no_bell:"} else {""}));
-        if i % lines_per_message == 0{
+        i += 1;
+        if i >= lines_per_message{
             message_vec.push(message_str);
             message_str = String::new();
+            i = 0;
         }
     }
     for user in users{
@@ -136,14 +139,14 @@ fn member_to_user(member: &Member) -> LocalUser{
 
 impl Handler{
     fn new() -> Self{
-        Handler {setup_data: DashMap::new(), match_data: DashMap::new()}
+        Handler {setup_data: SCCHashMap::new(), match_data: SCCHashMap::new()}
     }
 
-    fn begin(&self, command: &CommandInteraction) -> Result<String>{
+    async fn begin(&self, command: &CommandInteraction) -> Result<String>{
         let options = &command.data.options();
         
         let guild = command.guild_id.context("guild not found in begin setup")?;
-        if self.setup_data.contains_key(&guild){
+        if self.setup_data.contains_async(&guild).await{
             return Err(anyhow!("Starting new setup when already in the middle of setup"));
         }
 
@@ -160,7 +163,8 @@ impl Handler{
         static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[-_\p{L}\p{N}\p{sc=Deva}\p{sc=Thai}]{1,32}$").unwrap());
         if !RE.is_match(&shortname) {return Err(anyhow!("invalid command name"))};
 
-        self.setup_data.insert(guild, MatchMatrixSetup{threadname, shortname, users:Vec::new()});
+        self.setup_data.insert_async(guild, MatchMatrixSetup{threadname, shortname, users:Vec::new()}).await
+            .map_err(|(_k, _v)| anyhow!("Error: begin setup insert failed after check!"))?;
         Ok("Success".to_string())
     }
 
@@ -168,10 +172,11 @@ impl Handler{
         let options = &command.data.options();
 
         let guild = command.guild_id.context("guild not found in add name")?;
-        if !self.setup_data.contains_key(&guild){
+        if !self.setup_data.contains_async(&guild).await{
             return Err(anyhow!("Add name when not doing setup"));
         }
-        let mut setup = self.setup_data.get_mut(&guild).context("Adding user without match setup")?;
+        let mut setup_holder = self.setup_data.get_async(&guild).await.context("Adding user without match setup")?;
+        let setup = setup_holder.get_mut();
         let mut users_added = 0;
         let mut extra_info = String::new();
         for current_user in 0..10{
@@ -179,30 +184,30 @@ impl Handler{
                 value: ResolvedValue::User(user, _), ..
             }) = options.get(current_user) else {continue;};
             let localized = localize_user(user, ctx, guild).await?;
-            if lookup_userid(user.id, &setup.value().users).is_some(){
+            if lookup_userid(user.id, &setup.users).is_some(){
                 extra_info += &localized.name;
                 extra_info += " already included.\n";
                 continue;
             }
-            setup.value_mut().users.push(localized);
+            setup.users.push(localized);
             users_added += 1;
         }
 
-        Ok(format!("{}Added {} new players. Full list of {}: {:?}", extra_info, users_added, setup.value().users.len(), setup.value().users.iter().map(|x|&x.name).collect::<Vec<_>>()))
+        Ok(format!("{}Added {} new players. Full list of {}: {:?}", extra_info, users_added, setup.users.len(), setup.users.iter().map(|x|&x.name).collect::<Vec<_>>()))
     }
 
-    fn cancel(&self, command: &CommandInteraction) -> Result<String>{
+    async fn cancel(&self, command: &CommandInteraction) -> Result<String>{
         let guild = command.guild_id.context("guild not found in cancel")?;
-        if !self.setup_data.contains_key(&guild){
+        if !self.setup_data.contains_async(&guild).await{
             return Err(anyhow!("Cancel setup when not doing setup"));
         }
-        self.setup_data.remove(&guild);
+        self.setup_data.remove_async(&guild).await;
         Ok("Success".to_string())
     }
 
     async fn create(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
         let guild = command.guild_id.context("guild not found in create")?;
-        let (_, setup) = self.setup_data.remove(&guild).context("Create called but setup data not found!")?;
+        let (_, setup) = self.setup_data.remove_async(&guild).await.context("Create called but setup data not found!")?;
         let thread_builder = CreateThread::new(&setup.threadname)
             .kind(ChannelType::PublicThread);
         let thread = command.channel_id.create_thread(&ctx.http, thread_builder).await?;
@@ -224,7 +229,8 @@ impl Handler{
                 results.insert((x.id, y.id), result);
             }
         }
-        let msg_count = ((setup.users.len()*25)/1800)+1; //2000 character limit, 25 characters per user plus some wiggle room to be safe
+        let approx_char_count = ((setup.users.len()+1)*(setup.users.len()+1))*25; // Up to 25 characters per matrix square, plus the username and bell, plus the row of letters
+        let msg_count = (approx_char_count/1800)+1; //2000 character limit, plus some wiggle room to be safe
         let mut mainposts = Vec::new();
         let messages = render_grid(&setup.users, &results, &HashSet::new(), &setup.threadname, msg_count)?;
         for msg in messages{
@@ -234,9 +240,9 @@ impl Handler{
         thread.say(&ctx.http, ":cloud: match available\n:full_moon: match won 2-0\n:waning_gibbous_moon: match won 2-1\n\
             :waxing_crescent_moon: match lost 1-2\n:new_moon: match lost 0-2\n:black_small_square: cannot play yourself").await?;
 
-        let mut match_vec = self.match_data.entry(guild).or_insert(HashMap::new());
+        let mut match_vec = self.match_data.entry_async(guild).await.or_insert(HashMap::new());
         let matrix = MatchMatrix{thread: thread.id, threadname:setup.threadname, mainposts, users: setup.users, results, disabled_fam: HashSet::new()};
-        match_vec.insert(setup.shortname, matrix);
+        match_vec.get_mut().insert(setup.shortname, matrix);
         Self::reset_tournament_commands(ctx, &guild, &match_vec).await?;
 
         Ok("Success!".to_string())
@@ -245,7 +251,8 @@ impl Handler{
     async fn report_result_command(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
         let options = &command.data.options();
         let guild = command.guild_id.context("guild not found for result report")?;
-        let Some(mut match_data_list) = self.match_data.get_mut(&guild) else { return Err(anyhow!("guild has no match matrices"));};
+        let Some(mut match_data_list) = self.match_data.get_async(&guild).await else { return Err(anyhow!("guild has no match matrices"));};
+        let match_data_list = match_data_list.get_mut();
         
         let Some(ResolvedOption {
             value: ResolvedValue::String(result_str), ..
@@ -266,7 +273,8 @@ impl Handler{
     async fn report_result_any(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
         let options = &command.data.options();
         let guild = command.guild_id.context("guild not found for result report")?;
-        let Some(mut match_data_list) = self.match_data.get_mut(&guild) else { return Err(anyhow!("guild has no match matrices"));};
+        let Some(mut match_data_list) = self.match_data.get_async(&guild).await else { return Err(anyhow!("guild has no match matrices"));};
+        let match_data_list = match_data_list.get_mut();
 
         let Some(ResolvedOption {
             value: ResolvedValue::String(result_str), ..
@@ -308,7 +316,8 @@ impl Handler{
     async fn end(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
         let options = &command.data.options();
         let guild = command.guild_id.context("guild not found for end")?;
-        let Some(mut match_data_list) = self.match_data.get_mut(&guild) else { return Err(anyhow!("guild has no match matrices"));};
+        let Some(mut match_data_list) = self.match_data.get_async(&guild).await else { return Err(anyhow!("guild has no match matrices"));};
+        let match_data_list = match_data_list.get_mut();
 
         let Some(ResolvedOption {
             value: ResolvedValue::String(commandshortname), ..
@@ -375,7 +384,8 @@ impl Handler{
     async fn ping(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
         let options = &command.data.options();
         let guild = command.guild_id.context("guild not found for ping")?;
-        let Some(match_data_list) = self.match_data.get(&guild) else { return Err(anyhow!("guild has no match matrices"));};
+        let Some(match_data_list) = self.match_data.get_async(&guild).await else { return Err(anyhow!("guild has no match matrices"));};
+        let match_data_list = match_data_list.get();
 
         let Some(ResolvedOption {
             value: ResolvedValue::String(commandshortname), ..
@@ -398,7 +408,8 @@ impl Handler{
     async fn fam_pings(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
         let options = &command.data.options();
         let guild = command.guild_id.context("guild not found for ping")?;
-        let Some(match_data_list) = self.match_data.get(&guild) else { return Err(anyhow!("guild has no match matrices"));};
+        let Some(match_data_list) = self.match_data.get_async(&guild).await else { return Err(anyhow!("guild has no match matrices"));};
+        let match_data_list = match_data_list.get();
         let playerid = command.user.id;
         let mut mentions = HashSet::new();
 
@@ -477,7 +488,8 @@ impl Handler{
     async fn findable(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
         let options = &command.data.options();
         let guild = command.guild_id.context("guild not found for ping")?;
-        let Some(mut match_data_list) = self.match_data.get_mut(&guild) else { return Err(anyhow!("guild has no match matrices"));};
+        let Some(mut match_data_list) = self.match_data.get_async(&guild).await else { return Err(anyhow!("guild has no match matrices"));};
+        let match_data_list = match_data_list.get_mut();
         let playerid = command.user.id;
 
         let Some(ResolvedOption {
@@ -506,7 +518,7 @@ impl Handler{
 
     async fn reprocess(&self, ctx: &Context, command: &CommandInteraction) -> Result<String>{
         let guild = command.guild_id.context("guild not found for reprocess")?;
-        let messages = command.channel_id.messages(ctx, GetMessages::new().after(0)).await?;
+        let messages = command.channel_id.messages(ctx, GetMessages::new().after(1)).await?;
         let intro = &messages.get(messages.len()-1).context("intro message not found")?.content;
 
         //Read intro post for users and command name
@@ -532,16 +544,17 @@ impl Handler{
         static RE_MATCH_ICONS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r":cloud:|:full_moon:|:waning_gibbous_moon:|:waxing_crescent_moon:|:new_moon:|:black_small_square:").unwrap());
         loop {
             let Some(matrix_post) = &messages.get(messages.len()-message_offset) else { break };
-            if !matrix_post.content.contains(":black_small_square:") { break }
+            if !matrix_post.content.contains(":black_small_square:") { break } // Every row should have a "Can't Play vs Self" square, also catches the explanation post
             mainposts.push(matrix_post.id);
             total_matrix.push_str(&matrix_post.content);
             message_offset += 1;
         }
+        mainposts.pop(); // Remove the explanation post
         let mut matrix_match = RE_MATCH_ICONS.find_iter(&total_matrix);
         for y in &user_list{
             for x in &user_list{
                 let result = MatchResult::get(matrix_match.next()
-                    .context(format!("Unable to find match results matrix content: {} for {},{}", &total_matrix, x.name, y.name))?.as_str());
+                    .context(format!("Unable to find match results matrix content for {},{}", x.name, y.name))?.as_str());
                 results.insert((x.id, y.id), result);
             }
             if total_matrix.contains(&format!("{}:no_bell:", y.name)) {
@@ -549,7 +562,7 @@ impl Handler{
             }
         }
         let count = matrix_match.count();
-        if count != 6 { //The message explaining the meanings of the symbols
+        if count != 6 { // The message explaining the meanings of the symbols
             return Err(anyhow!("Symbol count in match matrix did not match expected: {} excess symbols found but expected 6", count));
         }
 
@@ -557,8 +570,8 @@ impl Handler{
         let user_count = user_list.len();
         let fullname = command.channel.as_ref().context("getting channel/thread")?.name.as_ref().context("getting channel/thread name")?;
         let matrix = MatchMatrix{thread: command.channel_id, threadname:fullname.to_string(), mainposts, users: user_list, results, disabled_fam};
-        let mut match_vec = self.match_data.entry(guild).or_insert(HashMap::new());
-        match_vec.insert(shortname.to_string(), matrix);
+        let mut match_vec = self.match_data.entry_async(guild).await.or_insert(HashMap::new());
+        match_vec.get_mut().insert(shortname.to_string(), matrix);
         Self::reset_tournament_commands(ctx, &guild, &match_vec).await?;
         
         Ok(format!("Processed {} ({}) with {} users - currently running {} tournaments", fullname, shortname, user_count, match_vec.len()))
@@ -586,10 +599,10 @@ impl EventHandler for Handler {
             }
             //println!("Received command interaction: {command:#?}");
             let result = match command.data.name.as_str() {
-                "begin" => self.begin(&command),
+                "begin" => self.begin(&command).await,
                 "add" => self.add_users(&ctx, &command).await,
                 "create" => self.create(&ctx, &command).await,
-                "cancel" => self.cancel(&command),
+                "cancel" => self.cancel(&command).await,
                 "end" => self.end(&ctx, &command).await,
                 "result" => self.report_result_any(&ctx, &command).await,
                 "reprocess" => self.reprocess(&ctx, &command).await,
@@ -598,9 +611,13 @@ impl EventHandler for Handler {
                 "matchpings" => self.findable(&ctx, &command).await,
                 _ => self.report_result_command(&ctx, &command).await,
             };
+
             let response2 = command.edit_response(&ctx.http, EditInteractionResponse::new().content(
                 match result{
-                    Err(why) => why.to_string(), //{println!("{}", why.backtrace()); why.to_string()},
+                    Err(why) => {
+                        println!("Error processing {}: {}", command.data.name.as_str(), why);
+                        why.to_string()
+                    },
                     Ok(success_result) => success_result,
                 })).await;
             if let Err(why) = response2{
