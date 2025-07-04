@@ -77,7 +77,7 @@ fn render_grid(users: &[LocalUser], results: &Matches, disabled_fam: &HashSet<Us
     let mut message_vec = Vec::new();
     let mut message_str = header.to_string();
     message_str.push('\n');
-    let lines_per_message = (users.len()+1)/message_count;
+    let lines_per_message = (users.len()+1).div_ceil(message_count);
     let mut i = 0;
     for y in users.iter(){
         let mut wins = 0;
@@ -116,7 +116,11 @@ fn render_grid(users: &[LocalUser], results: &Matches, disabled_fam: &HashSet<Us
         message_str.push_str(&id_square);
         message_str.push(' ');
     }
+    message_str.push_str("\n_ _");
     message_vec.push(message_str);
+    if message_vec.len() != message_count {
+        return Err(anyhow!("Grid render error: {} messages made but {} requested.", message_vec.len(), message_count));
+    }
     Ok(message_vec)
 }
 
@@ -544,12 +548,12 @@ impl Handler{
         static RE_MATCH_ICONS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r":cloud:|:full_moon:|:waning_gibbous_moon:|:waxing_crescent_moon:|:new_moon:|:black_small_square:").unwrap());
         loop {
             let Some(matrix_post) = &messages.get(messages.len()-message_offset) else { break };
-            if !matrix_post.content.contains(":black_small_square:") { break } // Every row should have a "Can't Play vs Self" square, also catches the explanation post
+            if !matrix_post.author.bot { break }
+            if !matrix_post.content.contains(":") { break }
             mainposts.push(matrix_post.id);
             total_matrix.push_str(&matrix_post.content);
             message_offset += 1;
         }
-        mainposts.pop(); // Remove the explanation post
         let mut matrix_match = RE_MATCH_ICONS.find_iter(&total_matrix);
         for y in &user_list{
             for x in &user_list{
@@ -562,7 +566,14 @@ impl Handler{
             }
         }
         let count = matrix_match.count();
-        if count != 6 { // The message explaining the meanings of the symbols
+        if count == 6 {
+            mainposts.pop(); // Remove the explanation post, the expected situation
+        } else if count == 0 && mainposts.len() >= 2 { // No explanation post, add it back in place of last bot post
+            let id = mainposts.pop().context("Something is very broken")?;
+            let msg = ":cloud: match available\n:full_moon: match won 2-0\n:waning_gibbous_moon: match won 2-1\n\
+                :waxing_crescent_moon: match lost 1-2\n:new_moon: match lost 0-2\n:black_small_square: cannot play yourself";
+            command.channel_id.message(&ctx.http, id).await?.edit(&ctx.http, EditMessage::new().content(msg)).await?;
+        } else  {
             return Err(anyhow!("Symbol count in match matrix did not match expected: {} excess symbols found but expected 6", count));
         }
 
