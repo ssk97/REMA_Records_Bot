@@ -15,7 +15,7 @@ enum MatchResult{
     NotPlayed, TwoZero, TwoOne, OneTwo, ZeroTwo, Unplayable
 }
 impl MatchResult{
-    fn get(result: &str) -> Self{
+    fn get(result: &str) -> Self {
         match result{
             "2-0"|":full_moon:" => Self::TwoZero,
             "2-1"|":waning_gibbous_moon:" => Self::TwoOne,
@@ -25,7 +25,7 @@ impl MatchResult{
             _ => Self::Unplayable,
         }
     }
-    fn render(&self) -> &str{
+    fn render(&self) -> &str {
         match self{
             Self::NotPlayed => ":cloud:",
             Self::TwoZero => ":full_moon:",
@@ -35,7 +35,7 @@ impl MatchResult{
             Self::Unplayable => ":black_small_square:"
         }
     }
-    fn invert(&self) -> Self{
+    fn invert(&self) -> Self {
         match self{
             Self::NotPlayed => Self::NotPlayed,
             Self::TwoZero => Self::ZeroTwo,
@@ -43,6 +43,16 @@ impl MatchResult{
             Self::OneTwo => Self::TwoOne,
             Self::ZeroTwo => Self::TwoZero,
             Self::Unplayable => Self::Unplayable
+        }
+    }
+    fn to_str(&self) -> &str {
+        match self{
+            Self::NotPlayed => "0-0",
+            Self::TwoZero => "2-0",
+            Self::TwoOne => "2-1",
+            Self::OneTwo => "1-2",
+            Self::ZeroTwo => "0-2",
+            Self::Unplayable => "ERROR"
         }
     }
 }
@@ -303,12 +313,17 @@ impl Handler{
         if player.id == opponent.id {
             return Err(anyhow!("trying to report a match played against the same player"));
         }
+        let old_result = matrix.results.get(&(player.id, opponent.id)).context("match result not available - bad user id?")?.clone();
         let result = MatchResult::get(result_str);
         let x = &mut matrix.results.get_mut(&(player.id, opponent.id)).context("match not found - bad user id?")?;
         **x = result.invert();
         let x2 = &mut matrix.results.get_mut(&(opponent.id, player.id)).context("reverse match not found - wtf?")?;
         **x2 = result;
-        matrix.thread.say(&ctx.http, format!("{} reports {} {} {}", reporter_user, player.name, result_str, opponent.name)).await?;
+        if old_result == MatchResult::NotPlayed {
+            matrix.thread.say(&ctx.http, format!("{} reports {} {} {}", reporter_user, player.name, result_str, opponent.name)).await?;
+        } else {
+            matrix.thread.say(&ctx.http, format!("{} reports {} {} {}, overwriting previous result of {}", reporter_user, player.name, result_str, opponent.name, old_result.to_str())).await?;
+        }
 
         let messages = render_grid(&matrix.users, &matrix.results, &matrix.disabled_fam, &matrix.threadname, matrix.mainposts.len())?;
         for (msg, post) in messages.iter().zip(&matrix.mainposts){
@@ -355,10 +370,11 @@ impl Handler{
             .required(true).add_int_choice("on", 1).add_int_choice("off", 0);
         let restrict_fam_ping = CreateCommandOption::new(CommandOptionType::Integer, "exclude", "Don't ping a given group of players")
             .add_int_choice("our strongest players", 1).add_int_choice("everybody else", 2);
+        let fam_noping = CreateCommandOption::new(CommandOptionType::Boolean, "Disable Pings", "Don't ping, print names only");
 
         let mut commands = vec![
             CreateCommand::new("fam").description("Find A Match: Ping other players that you haven't played yet")
-                .add_option(fam_user_options).add_option(restrict_fam_ping),
+                .add_option(fam_user_options).add_option(fam_noping).add_option(restrict_fam_ping),
             CreateCommand::new("matchpings").description("Enable or disable pinging for Find A Match")
                 .add_option(findable_user_options).add_option(findable_enable_option),
             CreateCommand::new("ping").description("Silent ping all players of a tournament")
@@ -422,8 +438,8 @@ impl Handler{
         enum RestrictValues {
             NoRestriction, ExcludeDangerous, ExcludeNormal
         }
-        fn get_opponents(playerid: UserId, matrix: &MatchMatrix, mentions: &mut HashSet<UserId>, restrict: RestrictValues) -> Option<String> {
-            let _ = lookup_userid(playerid, &matrix.users)?;
+        fn get_opponents(playerid: UserId, matrix: &MatchMatrix, mentions: &mut HashSet<UserId>, restrict: RestrictValues, text_only: bool) -> Option<String> {
+            let _ = lookup_userid(playerid, &matrix.users)?; // Confirm the user is in the matrix
             let mut message_str = String::new();
             let mut found_any = false;
             const DANGEROUS_LIST: [UserId; 4] =[
@@ -439,7 +455,7 @@ impl Handler{
                 };
                 //Self is MatchResult::Unplayable so no need to special case it
                 if matrix.results.get(&(playerid, opponent.id)) == Some(&MatchResult::NotPlayed) && !restricted_result{
-                    if matrix.disabled_fam.contains(&opponent.id) {
+                    if matrix.disabled_fam.contains(&opponent.id) || text_only {
                         message_str += &format!("{} ", opponent.name);
                     } else {
                         message_str += &format!("<@{}> ", opponent.id);
@@ -460,7 +476,14 @@ impl Handler{
             None => "",
             _ => return Err(anyhow!("Bad command arguments"))
         };
-        let restrict = match options.get(1){
+        let text_only = match options.get(1){
+            Some(ResolvedOption {
+                value: ResolvedValue::Boolean(bool_val), ..
+            }) => *bool_val,
+            None => false,
+            _ => return Err(anyhow!("Bad command arguments"))
+        };
+        let restrict = match options.get(2){
             Some(ResolvedOption {
                 value: ResolvedValue::Integer(restrict_str), ..
             }) => *restrict_str,
@@ -475,8 +498,12 @@ impl Handler{
         };
 
         for (shortname, matrix) in match_data_list.iter(){
+            if commandshortname.is_empty() && matrix.disabled_fam.contains(&playerid) {
+                output += &format!("\n{}: muted", shortname);
+                continue;
+            }
             if commandshortname.is_empty() || commandshortname == shortname{
-                if let Some(opponents_string) = get_opponents(playerid, matrix, &mut mentions, restrict){
+                if let Some(opponents_string) = get_opponents(playerid, matrix, &mut mentions, restrict, text_only){
                     output += &format!("\n{}: {}", shortname, &opponents_string);
                 }
             }
