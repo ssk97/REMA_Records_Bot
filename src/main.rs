@@ -313,7 +313,7 @@ impl Handler{
         if player.id == opponent.id {
             return Err(anyhow!("trying to report a match played against the same player"));
         }
-        let old_result = matrix.results.get(&(player.id, opponent.id)).context("match result not available - bad user id?")?.clone();
+        let old_result = matrix.results.get(&(opponent.id, player.id)).context("match result not available - bad user id?")?.clone();
         let result = MatchResult::get(result_str);
         let x = &mut matrix.results.get_mut(&(player.id, opponent.id)).context("match not found - bad user id?")?;
         **x = result.invert();
@@ -370,7 +370,7 @@ impl Handler{
             .required(true).add_int_choice("on", 1).add_int_choice("off", 0);
         let restrict_fam_ping = CreateCommandOption::new(CommandOptionType::Integer, "exclude", "Don't ping a given group of players")
             .add_int_choice("our strongest players", 1).add_int_choice("everybody else", 2);
-        let fam_noping = CreateCommandOption::new(CommandOptionType::Boolean, "Disable Pings", "Don't ping, print names only");
+        let fam_noping = CreateCommandOption::new(CommandOptionType::Boolean, "text-only", "Don't ping, print names only");
 
         let mut commands = vec![
             CreateCommand::new("fam").description("Find A Match: Ping other players that you haven't played yet")
